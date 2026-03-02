@@ -2,14 +2,96 @@
 MongoDB database configuration and setup for Mergington High School API
 """
 
+import os
+from types import SimpleNamespace
+from typing import Any, Dict, List
+
 from pymongo import MongoClient
 from argon2 import PasswordHasher, exceptions as argon2_exceptions
 
-# Connect to MongoDB
-client = MongoClient('mongodb://localhost:27017/')
-db = client['mergington_high']
-activities_collection = db['activities']
-teachers_collection = db['teachers']
+# Connect to MongoDB (or fall back to an in-memory MongoDB mock)
+mongodb_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
+
+try:
+    client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=3000)
+    client.admin.command("ping")
+    db = client['mergington_high']
+    activities_collection = db['activities']
+    teachers_collection = db['teachers']
+except Exception:
+    class InMemoryCollection:
+        def __init__(self):
+            self._documents: Dict[str, Dict[str, Any]] = {}
+
+        def count_documents(self, _query: Dict[str, Any]) -> int:
+            return len(self._documents)
+
+        def insert_one(self, document: Dict[str, Any]):
+            self._documents[document["_id"]] = dict(document)
+            return SimpleNamespace(inserted_id=document["_id"])
+
+        def find_one(self, query: Dict[str, Any]):
+            doc_id = query.get("_id")
+            if doc_id is None:
+                return None
+            found = self._documents.get(doc_id)
+            return dict(found) if found else None
+
+        def find(self, query: Dict[str, Any]):
+            def matches(document: Dict[str, Any]) -> bool:
+                for field, condition in query.items():
+                    if field == "schedule_details.days" and "$in" in condition:
+                        days = document.get("schedule_details", {}).get("days", [])
+                        if not any(day in days for day in condition["$in"]):
+                            return False
+                    elif field == "schedule_details.start_time" and "$gte" in condition:
+                        start = document.get("schedule_details", {}).get("start_time", "")
+                        if start < condition["$gte"]:
+                            return False
+                    elif field == "schedule_details.end_time" and "$lte" in condition:
+                        end = document.get("schedule_details", {}).get("end_time", "")
+                        if end > condition["$lte"]:
+                            return False
+                return True
+
+            for doc in self._documents.values():
+                if matches(doc):
+                    yield dict(doc)
+
+        def update_one(self, query: Dict[str, Any], update: Dict[str, Any]):
+            doc_id = query.get("_id")
+            document = self._documents.get(doc_id)
+            if not document:
+                return SimpleNamespace(modified_count=0)
+
+            modified = 0
+            if "$push" in update:
+                for field, value in update["$push"].items():
+                    items: List[Any] = document.setdefault(field, [])
+                    if value not in items:
+                        items.append(value)
+                        modified = 1
+
+            if "$pull" in update:
+                for field, value in update["$pull"].items():
+                    items: List[Any] = document.get(field, [])
+                    if value in items:
+                        items.remove(value)
+                        modified = 1
+
+            return SimpleNamespace(modified_count=modified)
+
+        def aggregate(self, pipeline: List[Dict[str, Any]]):
+            # Supports the specific pipeline used by get_available_days()
+            days = set()
+            for document in self._documents.values():
+                days.update(document.get("schedule_details", {}).get("days", []))
+
+            for day in sorted(days):
+                yield {"_id": day}
+
+    activities_collection = InMemoryCollection()
+    teachers_collection = InMemoryCollection()
 
 # Methods
 

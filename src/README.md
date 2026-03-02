@@ -18,8 +18,11 @@ A super simple FastAPI application that allows students to view and sign up for 
 2. Run the application:
 
    ```
-   python app.py
+   python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
    ```
+
+   The app uses `MONGODB_URI` when provided. If MongoDB is not available,
+   it automatically falls back to an in-memory mock database for local testing.
 
 3. Open your browser and go to:
    - API documentation: http://localhost:8000/docs
